@@ -1,0 +1,22 @@
+{
+    "serial": {
+        "port": "COM3",
+        "baudrate": 115200,
+        "timeout": 1.0
+    },
+    "ntrip": {
+        "host": "your-ntrip-server.com",
+        "port": 8002,
+        "mountpoint": "MOUNT_POINT",
+        "username": "USERNAME",
+        "password": "PASSWORD"
+    },
+    "logging": {
+        "level": "INFO",
+        "format": "%(asctime)s - %(levelname)s - %(message)s",
+        "file": "rtk_positioning.log"
+    },
+    "positioning": {
+        "coordinate_system": "WGS84"
+    }
+}
