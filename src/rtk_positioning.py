@@ -552,6 +552,72 @@ class NTRIPClient:
         self.is_connected = False
 
 
+class MockNTRIPClient(NTRIPClient):
+    """Mock NTRIP客户端，用于测试"""
+
+    def __init__(self, host: str, port: int, mountpoint: str, username: str = "", password: str = ""):
+        super().__init__(host, port, mountpoint, username, password)
+        self.mock_thread = None
+
+    def connect(self) -> bool:
+        """连接Mock NTRIP客户端"""
+        self.is_connected = True
+        logger.info(f"Mock NTRIP客户端连接成功 (模拟模式): {self.host}:{self.port}/{self.mountpoint}")
+
+        # 启动模拟线程
+        self.stop_event.clear()
+        self.mock_thread = threading.Thread(target=self._mock_loop, daemon=True)
+        self.mock_thread.start()
+
+        return True
+
+    def disconnect(self):
+        """断开Mock NTRIP客户端"""
+        self.stop_event.set()
+        if self.mock_thread:
+            self.mock_thread.join(timeout=2.0)
+
+        self.is_connected = False
+        logger.info("Mock NTRIP客户端已断开")
+
+    def _mock_loop(self):
+        """模拟数据发送循环"""
+        while not self.stop_event.is_set():
+            try:
+                # 构造一个符合RTCM格式的Mock数据包
+                # Header: 0xD3
+                # Length: 4 (0x00 0x04)
+                # Payload: 4 bytes (dummy)
+                # Total length = 3 (header) + 4 (payload) + 3 (CRC) = 10 bytes
+
+                header_payload = b'\xd3\x00\x04\xaa\xbb\xcc\xdd'
+                crc = self._calculate_crc24(header_payload)
+                full_msg = header_payload + struct.pack('>I', crc)[1:]
+
+                for callback in self.data_callbacks:
+                    try:
+                        callback(full_msg)
+                    except Exception as e:
+                        logger.error(f"Mock回调执行失败: {e}")
+
+                time.sleep(0.05)  # 20Hz发送频率
+            except Exception as e:
+                logger.error(f"Mock循环错误: {e}")
+                break
+
+    def _calculate_crc24(self, data: bytes) -> int:
+        """计算CRC24校验"""
+        crc = 0
+        for byte in data:
+            crc ^= byte << 16
+            for _ in range(8):
+                if crc & 0x800000:
+                    crc = (crc << 1) ^ 0x1864CFB
+                else:
+                    crc <<= 1
+                crc &= 0xFFFFFF
+        return crc
+
 class CoordinateConverter:
     """坐标转换工具"""
     
@@ -617,12 +683,16 @@ class RTKPositioningSystem:
         self.serial_comm.add_data_callback(self._on_serial_data)
     
     def configure_ntrip(self, host: str, port: int, mountpoint: str,
-                       username: str = "", password: str = ""):
+                       username: str = "", password: str = "", mock: bool = False):
         """配置NTRIP客户端"""
         if self.ntrip_client:
             self.ntrip_client.disconnect()
         
-        self.ntrip_client = NTRIPClient(host, port, mountpoint, username, password)
+        if mock:
+            self.ntrip_client = MockNTRIPClient(host, port, mountpoint, username, password)
+        else:
+            self.ntrip_client = NTRIPClient(host, port, mountpoint, username, password)
+
         self.ntrip_client.add_data_callback(self._on_ntrip_data)
     
     def start(self) -> bool:
@@ -705,9 +775,11 @@ class RTKPositioningSystem:
                             continue
                         
                         try:
+                            # print(line)
                             position = self.nmea_parser.parse_sentence(line)
                             if position:
                                 self.current_position = position
+                                print(position)
                                 # 只在有有效定位时记录详细信息
                                 if position.fix_quality.value > 0:
                                     self.logger.debug(f"位置更新: {position.latitude:.6f}, {position.longitude:.6f}, 质量: {position.fix_quality.name}")

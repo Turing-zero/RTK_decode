@@ -142,7 +142,7 @@ def main():
     
     # 创建RTK定位系统 - 只解析GGA消息
     print("配置NMEA消息解析: 只解析GGA消息")
-    rtk_system = RTKPositioningSystem(enabled_nmea_messages=['GGA'])
+    rtk_system = RTKPositioningSystem(enabled_nmea_messages=['GGA', 'RMC'])
     
     # 配置串口
     serial_config = config['serial']
@@ -155,6 +155,7 @@ def main():
     # 配置NTRIP
     ntrip_config = config['ntrip']
     rtk_system.configure_ntrip(
+        mock=ntrip_config['mock'],
         host=ntrip_config['host'],
         port=ntrip_config['port'],
         mountpoint=ntrip_config['mountpoint'],
