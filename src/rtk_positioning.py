@@ -18,6 +18,16 @@ from typing import Dict, List, Tuple, Optional, Callable
 from dataclasses import dataclass
 from enum import Enum
 
+# 尝试导入PositionHandler
+try:
+    from .position_handler import PositionHandler
+except ImportError:
+    # 如果在同一目录下
+    try:
+        from position_handler import PositionHandler
+    except ImportError:
+        PositionHandler = None
+
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -36,6 +46,12 @@ class FixQuality(Enum):
     SIMULATION = 8
 
 
+class PositionType(Enum):
+    """位置类型枚举"""
+    ROVER = 0
+    BASE = 1
+
+
 @dataclass
 class GPSPosition:
     """GPS位置信息"""
@@ -48,6 +64,10 @@ class GPSPosition:
     timestamp: datetime = None
     speed: float = 0.0
     course: float = 0.0
+
+    age: float = 0.0
+    stn_id: int = 0
+    type: PositionType = PositionType.ROVER
     
     def __post_init__(self):
         if self.timestamp is None:
@@ -151,6 +171,12 @@ class NMEAParser:
             
             # 海拔
             altitude = float(fields[9]) if fields[9] else 0.0
+
+            # 差分数据丢失时间
+            age = float(fields[13]) if fields[13] else 0.0
+
+            # 基站ID
+            stn_id = int(fields[14]) if fields[14] else 0
             
             self.position = GPSPosition(
                 latitude=lat,
@@ -159,7 +185,9 @@ class NMEAParser:
                 fix_quality=fix_quality,
                 satellites_used=satellites,
                 hdop=hdop,
-                timestamp=timestamp
+                timestamp=timestamp,
+                age=age,
+                stn_id=stn_id,
             )
             
         except (ValueError, IndexError) as e:
@@ -647,6 +675,30 @@ class CoordinateConverter:
         
         return lat, lon
 
+    @staticmethod
+    def ecef_to_lla(x: float, y: float, z: float) -> Tuple[float, float, float]:
+        """ECEF坐标转LLA (WGS84)"""
+        # WGS84椭球参数
+        a = 6378137.0
+        f = 1 / 298.257223563
+        b = a * (1 - f)
+        e2 = 2 * f - f * f
+        ep2 = (a * a - b * b) / (b * b)
+        
+        p = math.sqrt(x * x + y * y)
+        theta = math.atan2(z * a, p * b)
+        
+        lon = math.atan2(y, x)
+        lat = math.atan2(z + ep2 * b * math.pow(math.sin(theta), 3),
+                         p - e2 * a * math.pow(math.cos(theta), 3))
+        
+        # 转换为度
+        lat_deg = math.degrees(lat)
+        lon_deg = math.degrees(lon)
+        alt = p / math.cos(lat) - a / math.sqrt(1 - e2 * math.sin(lat) * math.sin(lat))
+        
+        return lat_deg, lon_deg, alt
+
 
 class RTKPositioningSystem:
     """RTK定位系统主类"""
@@ -667,6 +719,17 @@ class RTKPositioningSystem:
         self.is_running = False
         self.nmea_buffer = ""  # 添加NMEA数据缓冲区
         self.logger = logging.getLogger(f"{__name__}.RTKPositioningSystem")
+        
+        # 初始化PositionHandler
+        self.position_handler = PositionHandler() if PositionHandler else None
+        
+        # 监控相关
+        self.rtcm_stats = {}  # NTRIP数据统计 {msg_type: count}
+        self.last_gga_time = time.time()
+        self.monitor_thread = None
+        self.monitor_stop_event = threading.Event()
+        # 默认GGA (北京坐标)，用于串口无数据时保活
+        self.default_gga = "$GPGGA,065956.60,3013.3614955,N,12021.3076062,E,1,25,0.8,7.7175,M,7.953,M,,*69"
         
         # 注册回调函数
         self.nmea_parser.register_callback('GGA', self._on_gga_received)
@@ -711,6 +774,12 @@ class RTKPositioningSystem:
         
         if success:
             self.is_running = True
+
+            # 启动监控线程
+            self.monitor_stop_event.clear()
+            self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+            self.monitor_thread.start()
+
             logger.info("RTK定位系统启动成功")
         else:
             logger.error("RTK定位系统启动失败")
@@ -720,15 +789,46 @@ class RTKPositioningSystem:
     def stop(self):
         """停止RTK定位系统"""
         self.is_running = False
-        
+
+        # 停止监控线程
+        self.monitor_stop_event.set()
+        if self.monitor_thread:
+            self.monitor_thread.join(timeout=2.0)
+
         if self.serial_comm:
             self.serial_comm.disconnect()
         
         if self.ntrip_client:
             self.ntrip_client.disconnect()
+            
+        if self.position_handler:
+            self.position_handler.close()
         
         logger.info("RTK定位系统已停止")
-    
+
+    def _monitor_loop(self):
+        """系统监控循环"""
+        while not self.monitor_stop_event.is_set():
+            current_time = time.time()
+            
+            # 1. 检查GGA数据超时 (10秒)
+            if self.ntrip_client and self.ntrip_client.is_connected:
+                if current_time - self.last_gga_time > 2:
+                    logger.warning("未检测到串口GGA数据输入，发送默认GGA以保持NTRIP连接")
+                    self.ntrip_client.send_gga(self.default_gga)
+                    
+                    # 避免立即重复发送，重置计时器或稍微推后
+                    # 这里我们不更新last_gga_time，因为那代表真实收到数据的时间
+                    # 但为了防止循环太快，我们在循环末尾有sleep
+            
+            # 2. 输出NTRIP数据统计 (每10秒)
+            if int(current_time) % 10 == 0:
+                if self.rtcm_stats:
+                    stats_str = ", ".join([f"Type {k}: {v}" for k, v in sorted(self.rtcm_stats.items())])
+                    logger.info(f"NTRIP数据统计 (累计): {stats_str}")
+
+            time.sleep(1.0) # 每秒检查一次
+
     def get_position(self) -> GPSPosition:
         """获取当前位置"""
         return self.current_position
@@ -775,11 +875,10 @@ class RTKPositioningSystem:
                             continue
                         
                         try:
-                            # print(line)
                             position = self.nmea_parser.parse_sentence(line)
                             if position:
                                 self.current_position = position
-                                print(position)
+                                # print(position)
                                 # 只在有有效定位时记录详细信息
                                 if position.fix_quality.value > 0:
                                     self.logger.debug(f"位置更新: {position.latitude:.6f}, {position.longitude:.6f}, 质量: {position.fix_quality.name}")
@@ -799,7 +898,13 @@ class RTKPositioningSystem:
         try:
             # 解析RTCM数据
             messages = self.rtcm_parser.parse_message(data)
-            
+
+            # 统计消息类型
+            for msg in messages:
+                msg_type = msg.get('type')
+                if msg_type:
+                    self.rtcm_stats[msg_type] = self.rtcm_stats.get(msg_type, 0) + 1
+
             # 将RTCM数据转发给GPS设备
             if self.serial_comm and messages:
                 self.serial_comm.send_data(data)
@@ -809,19 +914,91 @@ class RTKPositioningSystem:
     
     def _on_gga_received(self, fields: List[str], position: GPSPosition):
         """GGA消息回调"""
+        self.last_gga_time = time.time()  # 更新收到GGA的时间
+        
+        # 使用PositionHandler处理 (存储、可视化)
+        if self.position_handler:
+            self.position_handler.handle_position(position)
+        
         if position and position.fix_quality != FixQuality.INVALID:
             # 发送GGA到NTRIP服务器
             if self.ntrip_client and self.ntrip_client.is_connected:
                 gga_sentence = ','.join(fields)
                 self.ntrip_client.send_gga(gga_sentence)
-    
+                logger.debug(f"发送GGA到NTRIP服务器: {gga_sentence}")
+        else:
+            # 添加了这条日志，方便调试
+            logger.info(f"收到GGA消息但定位无效 (Quality: {position.fix_quality.name if position else 'None'}), 发送默认GGA以保持NTRIP连接")
+            if self.ntrip_client and self.ntrip_client.is_connected:
+                self.ntrip_client.send_gga(self.default_gga)
+
     def _on_rmc_received(self, fields: List[str], position: GPSPosition):
         """RMC消息回调"""
         logger.debug(f"收到RMC: 位置({position.latitude:.6f}, {position.longitude:.6f})")
     
     def _on_rtcm_1005(self, message: Dict):
         """RTCM 1005消息回调 (基站坐标)"""
-        logger.debug("收到RTCM 1005消息 (基站坐标)")
+        try:
+            payload = message['data']
+            if not payload:
+                return
+
+            # 将bytes转换为大整数以便位操作
+            # RTCM消息是大端序
+            bits_val = int.from_bytes(payload, 'big')
+            total_bits = len(payload) * 8
+            
+            # 辅助函数：提取指定位
+            def get_bits(start_bit, length):
+                # start_bit: 从0开始，高位在前
+                shift = total_bits - (start_bit + length)
+                mask = (1 << length) - 1
+                return (bits_val >> shift) & mask
+            
+            # 提取带符号位
+            def get_signed_bits(start_bit, length):
+                val = get_bits(start_bit, length)
+                if val & (1 << (length - 1)):
+                    val -= (1 << length)
+                return val
+
+            # RTCM 1005 结构解析 (Message Number 12 bits starts at 0)
+            # DF025: 38 bits (Antenna Reference Point ECEF-X) - offset 34
+            # DF028: 38 bits (Antenna Reference Point ECEF-Y) - offset 74
+            # DF030: 38 bits (Antenna Reference Point ECEF-Z) - offset 114
+            
+            # ECEF X
+            x_int = get_signed_bits(34, 38)
+            x = x_int * 0.0001
+            
+            # ECEF Y
+            y_int = get_signed_bits(74, 38)
+            y = y_int * 0.0001
+            
+            # ECEF Z
+            z_int = get_signed_bits(114, 38)
+            z = z_int * 0.0001
+            
+            logger.debug(f"基站ECEF坐标: X={x:.4f}, Y={y:.4f}, Z={z:.4f}")
+            
+            # 转换为LLA
+            lat, lon, alt = CoordinateConverter.ecef_to_lla(x, y, z)
+            logger.info(f"基站位置更新: Lat={lat:.8f}, Lon={lon:.8f}, Alt={alt:.3f}")
+            
+            # 构造GPSPosition对象并传递给PositionHandler
+            if self.position_handler:
+                base_position = GPSPosition(
+                    latitude=lat,
+                    longitude=lon,
+                    altitude=alt,
+                    fix_quality=FixQuality.SIMULATION, # 基站坐标通常是固定的
+                    type=PositionType.BASE,
+                    timestamp=datetime.now()
+                )
+                self.position_handler.handle_position(base_position)
+                
+        except Exception as e:
+            logger.error(f"解析RTCM 1005失败: {e}")
     
     def _on_rtcm_1077(self, message: Dict):
         """RTCM 1077消息回调 (GPS MSM7)"""

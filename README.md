@@ -68,6 +68,10 @@ python test_rtk.py test-coord
 # 测试NMEA消息过滤
 python test_rtk.py test-filter
 
+# 测试NTRIP连接
+python test_ntrip.py [duration] [--real]
+# 示例: python test_ntrip.py 10 --real
+
 # 运行所有测试
 python test_rtk.py test-all
 ```

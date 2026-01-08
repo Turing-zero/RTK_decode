@@ -91,6 +91,7 @@ def test_nmea_parsing():
 def test_coordinate_conversion():
     """测试坐标转换功能"""
     from src.rtk_positioning import CoordinateConverter
+    import math
     
     print("\n测试坐标转换功能")
     print("-" * 30)
@@ -106,6 +107,63 @@ def test_coordinate_conversion():
     # 转换回WGS84
     lat2, lon2 = CoordinateConverter.utm_to_wgs84(x, y, zone, hemisphere)
     print(f"转换回WGS84: {lat2:.6f}°, {lon2:.6f}°")
+    
+    # 测试ECEF转LLA
+    # 使用大致的北京坐标ECEF值
+    # Lat: 39.9042, Lon: 116.4074, Alt: 50.0
+    # X: -2176840.0, Y: 4386220.0, Z: 4072230.0 (Approximate values)
+    ecef_x = -2176840.0
+    ecef_y = 4386220.0
+    ecef_z = 4072230.0
+    
+    lat3, lon3, alt3 = CoordinateConverter.ecef_to_lla(ecef_x, ecef_y, ecef_z)
+    print(f"\nECEF测试输入: X={ecef_x}, Y={ecef_y}, Z={ecef_z}")
+    print(f"ECEF转LLA结果: Lat={lat3:.6f}°, Lon={lon3:.6f}°, Alt={alt3:.2f}m")
+    
+    # 验证接近度 (粗略验证)
+    if abs(lat3 - 39.9) < 1.0 and abs(lon3 - 116.4) < 1.0:
+        print("✓ ECEF转LLA转换合理")
+    else:
+        print("✗ ECEF转LLA转换可能存在偏差")
+
+def test_rtcm_parsing():
+    """测试RTCM解析功能"""
+    from src.rtk_positioning import RTKPositioningSystem
+    import struct
+    
+    print("\n测试RTCM解析功能 (Mock)")
+    print("-" * 30)
+    
+    rtk = RTKPositioningSystem()
+    
+    # 构造模拟的RTCM 1005 Payload (不包含头和CRC)
+    # 假设我们有一个简单的Payload，这里主要测试代码逻辑是否崩溃
+    # 构造一个合法的19字节Payload
+    # 12 bits msg num (1005 = 0x3ED)
+    # ... zero padding for simplicity, just to check if it runs
+    
+    # Message Number 1005 = 0011 1110 1101
+    # First 2 bytes: 0011 1110 1101 xxxx -> 0x3E 0xD0
+    payload = bytearray(19)
+    payload[0] = 0x3E
+    payload[1] = 0xD0
+    
+    # 设置一些位来模拟坐标
+    # X starts at bit 34. 
+    # Byte 4 (index 4) contains bits 32-39.
+    # Bit 34 is the 3rd bit of byte 4 (0-indexed in byte? No, continuous stream).
+    # Let's just pass zero payload and see if it decodes to 0,0,0
+    
+    msg = {'type': 1005, 'data': bytes(payload), 'length': 19}
+    
+    print("调用 _on_rtcm_1005...")
+    try:
+        rtk._on_rtcm_1005(msg)
+        print("✓ _on_rtcm_1005 执行成功 (无异常)")
+    except Exception as e:
+        print(f"✗ _on_rtcm_1005 执行失败: {e}")
+
+
 
 def test_nmea_message_filtering():
     """测试NMEA消息过滤功能"""
@@ -192,7 +250,8 @@ def main():
                     
                     print(f"纬度:{lat_str} 经度:{lon_str} 海拔:{alt_str} "
                           f"质量:{position.fix_quality.name:>10} 卫星数:{position.satellites_used:>5} "
-                          f"HDOP:{position.hdop:>5.2f}")
+                          f"HDOP:{position.hdop:>5.2f} "
+                          f"丢失:{position.age:>5.2f}s 基站ID:{position.stn_id:>3d}")
                     
                     # 速度和航向信息
                     if position.speed > 0:
@@ -223,15 +282,19 @@ if __name__ == "__main__":
             test_coordinate_conversion()
         elif sys.argv[1] == "test-filter":
             test_nmea_message_filtering()
+        elif sys.argv[1] == "test-rtcm":
+            test_rtcm_parsing()
         elif sys.argv[1] == "test-all":
             test_nmea_parsing()
             test_coordinate_conversion()
             test_nmea_message_filtering()
+            test_rtcm_parsing()
         else:
             print("可用的测试选项:")
             print("  test-nmea   - 测试NMEA解析")
             print("  test-coord  - 测试坐标转换")
             print("  test-filter - 测试NMEA消息过滤")
+            print("  test-rtcm   - 测试RTCM解析 (Mock)")
             print("  test-all    - 运行所有测试")
     else:
         main()
