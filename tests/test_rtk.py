@@ -10,13 +10,16 @@ import logging
 import sys
 import os
 
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from src.rtk_positioning import RTKPositioningSystem, FixQuality
 
 def load_config(config_file: str = 'config.json') -> dict:
     """加载配置文件"""
     # 如果是相对路径，则相对于项目根目录
     if not os.path.isabs(config_file):
-        project_root = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         config_file = os.path.join(project_root, config_file)
     
     try:
@@ -200,7 +203,13 @@ def main():
     
     # 创建RTK定位系统 - 只解析GGA消息
     print("配置NMEA消息解析: 只解析GGA消息")
-    rtk_system = RTKPositioningSystem(enabled_nmea_messages=['GGA', 'RMC'])
+    
+    # 获取数据日志路径
+    log_config = config.get('logging', {})
+    data_log = log_config.get('data_log', 'rtk_data.log')
+    print(f"定位数据日志: {data_log}")
+    
+    rtk_system = RTKPositioningSystem(enabled_nmea_messages=['GGA', 'RMC'], log_file=data_log)
     
     # 配置串口
     serial_config = config['serial']

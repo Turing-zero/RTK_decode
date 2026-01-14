@@ -68,10 +68,55 @@ class GPSPosition:
     age: float = 0.0
     stn_id: int = 0
     type: PositionType = PositionType.ROVER
+    extra_info: Dict = None
     
     def __post_init__(self):
         if self.timestamp is None:
             self.timestamp = datetime.now()
+        if self.extra_info is None:
+            self.extra_info = {}
+
+    def to_dict(self) -> Dict:
+        """转换为字典"""
+        return {
+            'latitude': self.latitude,
+            'longitude': self.longitude,
+            'altitude': self.altitude,
+            'fix_quality': self.fix_quality.name,
+            'satellites_used': self.satellites_used,
+            'hdop': self.hdop,
+            'timestamp': self.timestamp.isoformat() if self.timestamp else None,
+            'speed': self.speed,
+            'course': self.course,
+            'age': self.age,
+            'stn_id': self.stn_id,
+            'type': self.type.name,
+            'extra_info': self.extra_info
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict):
+        """从字典创建对象"""
+        try:
+            timestamp = datetime.fromisoformat(data['timestamp']) if data.get('timestamp') else None
+        except:
+            timestamp = None
+
+        return cls(
+            latitude=data.get('latitude', 0.0),
+            longitude=data.get('longitude', 0.0),
+            altitude=data.get('altitude', 0.0),
+            fix_quality=FixQuality[data.get('fix_quality', 'INVALID')],
+            satellites_used=data.get('satellites_used', 0),
+            hdop=data.get('hdop', 0.0),
+            timestamp=timestamp,
+            speed=data.get('speed', 0.0),
+            course=data.get('course', 0.0),
+            age=data.get('age', 0.0),
+            stn_id=data.get('stn_id', 0),
+            type=PositionType[data.get('type', 'ROVER')],
+            extra_info=data.get('extra_info', {})
+        )
 
 
 class NMEAParser:
@@ -88,8 +133,8 @@ class NMEAParser:
         self.position = GPSPosition()
         self.callbacks = {}
         # 设置启用的消息类型，默认解析所有支持的类型
-        self.enabled_messages = set(enabled_messages) if enabled_messages else {'GGA', 'RMC'}
-        self.supported_messages = {'GGA', 'RMC'}  # 当前支持的消息类型
+        self.enabled_messages = set(enabled_messages) if enabled_messages else {'GGA', 'RMC', 'GLL'}
+        self.supported_messages = {'GGA', 'RMC', 'GLL'}  # 当前支持的消息类型
     
     def register_callback(self, message_type: str, callback: Callable):
         """注册消息回调函数"""
@@ -241,7 +286,44 @@ class NMEAParser:
             logger.warning(f"解析RMC消息失败: {e}")
         
         return self.position
-    
+
+    def parse_gll(self, fields: List[str]) -> GPSPosition:
+        """解析GLL消息 (地理定位信息)"""
+        # Format: $GNGLL,lat,N/S,lon,E/W,time,status,mode*cs
+        if len(fields) < 7:
+            return self.position
+
+        try:
+            # 位置
+            lat = self.parse_coordinate(fields[1], fields[2])
+            lon = self.parse_coordinate(fields[3], fields[4])
+
+            # 时间
+            time_str = fields[5]
+            if time_str:
+                hour = int(time_str[:2])
+                minute = int(time_str[2:4])
+                second = int(float(time_str[4:]))
+                now = datetime.now()
+                timestamp = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
+            else:
+                timestamp = datetime.now()
+
+            # 状态 (A=有效, V=无效)
+            status = fields[6]
+            quality = FixQuality.GPS_FIX if status == 'A' else FixQuality.INVALID
+
+            # 更新位置信息
+            self.position.latitude = lat
+            self.position.longitude = lon
+            self.position.timestamp = timestamp
+            self.position.fix_quality = quality
+
+        except (ValueError, IndexError) as e:
+            logger.warning(f"解析GLL消息失败: {e}")
+
+        return self.position
+
     def parse_sentence(self, sentence: str) -> Optional[GPSPosition]:
         """解析NMEA语句"""
         sentence = sentence.strip()
@@ -268,6 +350,8 @@ class NMEAParser:
             position = self.parse_gga(fields)
         elif message_type == 'RMC':
             position = self.parse_rmc(fields)
+        elif message_type == 'GLL':
+            position = self.parse_gll(fields)
         
         # 调用回调函数
         if message_type in self.callbacks:
@@ -441,11 +525,15 @@ class SerialCommunicator:
     def send_data(self, data: bytes) -> bool:
         """发送数据"""
         if not self.is_connected or not self.serial_conn:
+            logger.warning("尝试发送数据但串口未连接")
             return False
         
         try:
-            self.serial_conn.write(data)
+            bytes_written = self.serial_conn.write(data)
             self.serial_conn.flush()
+            # 仅在DEBUG模式或每隔一定次数打印，避免刷屏
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"已写入串口: {bytes_written} 字节")
             return True
         except Exception as e:
             logger.error(f"发送数据失败: {e}")
@@ -625,6 +713,7 @@ class MockNTRIPClient(NTRIPClient):
                 for callback in self.data_callbacks:
                     try:
                         callback(full_msg)
+                        logger.debug(f"Mock发送数据: {len(full_msg)} bytes")
                     except Exception as e:
                         logger.error(f"Mock回调执行失败: {e}")
 
@@ -703,7 +792,7 @@ class CoordinateConverter:
 class RTKPositioningSystem:
     """RTK定位系统主类"""
     
-    def __init__(self, enabled_nmea_messages: Optional[List[str]] = None):
+    def __init__(self, enabled_nmea_messages: Optional[List[str]] = None, log_file = None):
         """
         初始化RTK定位系统
         
@@ -721,7 +810,7 @@ class RTKPositioningSystem:
         self.logger = logging.getLogger(f"{__name__}.RTKPositioningSystem")
         
         # 初始化PositionHandler
-        self.position_handler = PositionHandler() if PositionHandler else None
+        self.position_handler = PositionHandler(log_file=log_file if log_file else "rtk.log") if PositionHandler else None
         
         # 监控相关
         self.rtcm_stats = {}  # NTRIP数据统计 {msg_type: count}
@@ -896,7 +985,14 @@ class RTKPositioningSystem:
     def _on_ntrip_data(self, data: bytes):
         """处理NTRIP数据"""
         try:
-            # 解析RTCM数据
+            # 优先转发数据给GPS设备 (无论解析是否成功，原始数据都必须转发)
+            if self.serial_comm:
+                if not self.serial_comm.send_data(data):
+                    logger.warning(f"转发NTRIP数据到串口失败 ({len(data)} bytes)")
+            else:
+                logger.warning("收到NTRIP数据但未配置串口，无法转发")
+
+            # 解析RTCM数据 (仅用于统计)
             messages = self.rtcm_parser.parse_message(data)
 
             # 统计消息类型
@@ -904,10 +1000,6 @@ class RTKPositioningSystem:
                 msg_type = msg.get('type')
                 if msg_type:
                     self.rtcm_stats[msg_type] = self.rtcm_stats.get(msg_type, 0) + 1
-
-            # 将RTCM数据转发给GPS设备
-            if self.serial_comm and messages:
-                self.serial_comm.send_data(data)
                 
         except Exception as e:
             logger.error(f"处理NTRIP数据失败: {e}")

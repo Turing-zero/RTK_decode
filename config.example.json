@@ -5,6 +5,7 @@
         "timeout": 1.0
     },
     "ntrip": {
+        "mock": true,
         "host": "your-ntrip-server.com",
         "port": 8002,
         "mountpoint": "MOUNT_POINT",
@@ -14,7 +15,8 @@
     "logging": {
         "level": "INFO",
         "format": "%(asctime)s - %(levelname)s - %(message)s",
-        "file": "rtk_positioning.log"
+        "file": "rtk_positioning.log",
+        "data_log": "log/gps_data.log"
     },
     "positioning": {
         "coordinate_system": "WGS84"
